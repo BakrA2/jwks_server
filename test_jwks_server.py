@@ -11,7 +11,8 @@ class TestJWKSAuthServer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        #"""Start the server in a separate thread."""
+        
+        #start the server in a separate thread.
         cls.server = HTTPServer((hostName, serverPort), MyServer)
         cls.server_thread = Thread(target=cls.server.serve_forever)
         cls.server_thread.daemon = True
@@ -19,12 +20,14 @@ class TestJWKSAuthServer(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-       # """Shutdown the server."""
+
+       # Shutdown the server.
         cls.server.shutdown()
         cls.server_thread.join()
 
     def test_get_jwks(self):
-       # """Test the JWKS retrieval from the /.well-known/jwks.json endpoint."""
+
+       # test the JWKS retrieval from the /.well-known/jwks.json endpoint.
         response = requests.get(f'http://{hostName}:{serverPort}/.well-known/jwks.json')
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -33,7 +36,8 @@ class TestJWKSAuthServer(unittest.TestCase):
         self.assertEqual(data["keys"][0]["alg"], "RS256")
 
     def test_post_auth(self):
-        #"""Test the /auth endpoint for generating a JWT token."""
+
+        #test the /auth endpoint for generating a JWT token.
         response = requests.post(f'http://{hostName}:{serverPort}/auth')
         self.assertEqual(response.status_code, 200)
         token = response.text
@@ -41,7 +45,8 @@ class TestJWKSAuthServer(unittest.TestCase):
         self.assertEqual(decoded["user"], "username")
 
     def test_post_auth_expired(self):
-       # """Test the /auth endpoint with an expired token."""
+
+       #Test the /auth endpoint with an expired token.
         response = requests.post(f'http://{hostName}:{serverPort}/auth?expired=true')
         self.assertEqual(response.status_code, 200)
         token = response.text
@@ -50,7 +55,8 @@ class TestJWKSAuthServer(unittest.TestCase):
         self.assertLess(decoded["exp"], int(datetime.datetime.utcnow().timestamp()))
 
     def test_unsupported_methods(self):
-       # """Test unsupported HTTP methods such as PUT, DELETE, etc."""
+
+       #test unsupported HTTP methods such as PUT, DELETE, etc.
         for method in ['put', 'patch', 'delete', 'head']:
             req_method = getattr(requests, method)
             response = req_method(f'http://{hostName}:{serverPort}/auth')

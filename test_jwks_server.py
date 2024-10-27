@@ -1,11 +1,8 @@
-# Bakr Alkhalidi
-# bma0152
-# csce 3550.001
-
 import unittest
-# import requests
+import requests
 import json
 import jwt
+import datetime
 from http.server import HTTPServer
 from threading import Thread
 from jwks_server import MyServer, hostName, serverPort
@@ -38,6 +35,10 @@ class TestJWKSAuthServer(unittest.TestCase):
         self.assertIn("keys", data)
         self.assertEqual(data["keys"][0]["kid"], "goodKID")
         self.assertEqual(data["keys"][0]["alg"], "RS256")
+
+        # test non jwks path returns a 404
+        response = requests.get(f'http://{hostName}:{serverPort}/.well-known/KEYS.json')
+        self.assertEqual(response.status_code, 404)
 
     def test_post_auth(self):
 

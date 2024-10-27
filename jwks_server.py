@@ -3,146 +3,187 @@
 #Bma0152
 #csce 3550.001
 
-#importing needed parts for code
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from urllib.parse import urlparse, parse_qs
+import sqlite3
 import base64
 import json
 import jwt
 import datetime
+from datetime import timezone  # For fixing the deprecation warning
 
 # Server configuration
 hostName = "localhost"
 serverPort = 8080
 
-# Generate the provater keys 
-private_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048,
-)
-expired_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048,
-)
+# SQLite DB file
+db_file = "totally_not_my_privateKeys.db"
 
-# Put the private keys in PEM format
-pem = private_key.private_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PrivateFormat.TraditionalOpenSSL,
-    encryption_algorithm=serialization.NoEncryption()
-)
-expired_pem = expired_key.private_bytes(
-    encoding=serialization.Encoding.PEM,
-    format=serialization.PrivateFormat.TraditionalOpenSSL,
-    encryption_algorithm=serialization.NoEncryption()
-)
+# Create SQLite table if not exists
+def init_db():
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS keys(
+            kid INTEGER PRIMARY KEY AUTOINCREMENT,
+            key BLOB NOT NULL,
+            exp INTEGER NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# Get the public numbers from the private key 
-numbers = private_key.private_numbers()
+# Save a private key to the database
+def save_key_to_db(key_pem, exp_timestamp):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute('INSERT INTO keys (key, exp) VALUES (?, ?)', (key_pem, exp_timestamp))
+    conn.commit()
+    conn.close()
 
+# Get a key from the database (expired or valid)
+def get_key_from_db(expired=False):
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    if expired:
+        c.execute('SELECT key FROM keys WHERE exp <= ? ORDER BY exp LIMIT 1', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+    else:
+        c.execute('SELECT key FROM keys WHERE exp > ? ORDER BY exp LIMIT 1', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
+# Get all valid keys (for JWKS)
+def get_all_valid_keys():
+    conn = sqlite3.connect(db_file)
+    c = conn.cursor()
+    c.execute('SELECT key FROM keys WHERE exp > ?', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+    rows = c.fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+# Convert an integer to a Base64URL-encoded string
 def int_to_base64(value):
-    """Convert an integer to a Base64URL-encoded string"""
     value_hex = format(value, 'x')
-
-    # Ensure even length
     if len(value_hex) % 2 == 1:
         value_hex = '0' + value_hex
     value_bytes = bytes.fromhex(value_hex)
     encoded = base64.urlsafe_b64encode(value_bytes).rstrip(b'=')
     return encoded.decode('utf-8')
 
+# Serialize the private key to PEM format
+def serialize_key(key):
+    return key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption()
+    )
 
-#define server and all the parts of the server as well as the responces they give.
+# Deserialize a private key from PEM format
+def deserialize_key(key_pem):
+    return serialization.load_pem_private_key(key_pem, password=None)
+
+# Initialize the database and add keys
+def initialize_keys():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    expired_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    
+    # Save keys in PEM format with expiry timestamps
+    save_key_to_db(serialize_key(private_key), int((datetime.datetime.now(timezone.utc) + datetime.timedelta(hours=1)).timestamp()))  # Valid for 1 hour
+    save_key_to_db(serialize_key(expired_key), int((datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=1)).timestamp()))  # Already expired
+
+# Define server and request handlers
 class MyServer(BaseHTTPRequestHandler):
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        params = parse_qs(parsed_path.query)
+        
+        # If the request is to the "/auth" endpoint, generate a JWT token
+        if parsed_path.path == "/auth":
+            expired = 'expired' in params
+            key_pem = get_key_from_db(expired)
+            
+            if key_pem:
+                private_key = deserialize_key(key_pem)
+                numbers = private_key.private_numbers()
+
+                headers = {
+                    "kid": "expiredKID" if expired else "goodKID"
+                }
+                token_payload = {
+                    "user": "username",
+                    "exp": datetime.datetime.now(timezone.utc) + datetime.timedelta(hours=1) if not expired else datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=1)
+                }
+                encoded_jwt = jwt.encode(token_payload, private_key, algorithm="RS256", headers=headers)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(bytes(encoded_jwt, "utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"No valid key found.")
+            return
+        
+        self.send_response(405)
+        self.end_headers()
+        return
+
+    def do_GET(self):
+        if self.path == "/.well-known/jwks.json":
+            valid_keys = get_all_valid_keys()
+            keys = []
+
+            for key_pem in valid_keys:
+                private_key = deserialize_key(key_pem)
+                numbers = private_key.private_numbers()
+                jwk = {
+                    "alg": "RS256",
+                    "kty": "RSA",
+                    "use": "sig",
+                    "kid": "goodKID",
+                    "n": int_to_base64(numbers.public_numbers.n),
+                    "e": int_to_base64(numbers.public_numbers.e),
+                }
+                keys.append(jwk)
+
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(bytes(json.dumps({"keys": keys}), "utf-8"))
+            return
+        
+        self.send_response(404)
+        self.end_headers()
+        return
+
     def do_PUT(self):
         self.send_response(405)
         self.end_headers()
         return
-
     def do_PATCH(self):
         self.send_response(405)
         self.end_headers()
         return
-
     def do_DELETE(self):
         self.send_response(405)
         self.end_headers()
         return
-
     def do_HEAD(self):
         self.send_response(405)
         self.end_headers()
         return
 
-    # Handle post requests (used for token generation)
-    def do_POST(self):
-        parsed_path = urlparse(self.path)
-        params = parse_qs(parsed_path.query)
-
-        # If the request is to the "/auth" endpoint, generate a JWT token
-        if parsed_path.path == "/auth":
-            headers = {
-                "kid": "goodKID"
-            }
-            token_payload = {
-                "user": "username",
-                "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
-            }
-            if 'expired' in params:
-                headers["kid"] = "expiredKID"
-                token_payload["exp"] = datetime.datetime.utcnow() - datetime.timedelta(hours=1)
-            encoded_jwt = jwt.encode(token_payload, pem, algorithm="RS256", headers=headers)
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(bytes(encoded_jwt, "utf-8"))
-            return
-
-        self.send_response(405)
-        self.end_headers()
-        return
-
-    # Handle GET requests (used for serving the JWKS endpoint)
-    def do_GET(self):
-        if self.path == "/.well-known/jwks.json":
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
-            self.end_headers()
-            keys = {
-                "keys": [
-                    {
-                        "alg": "RS256",
-                        "kty": "RSA",
-                        "use": "sig",
-                        "kid": "goodKID",
-                        "n": int_to_base64(numbers.public_numbers.n),
-                        "e": int_to_base64(numbers.public_numbers.e),
-                    }
-                ]
-            }
-
-            # Write the JWKS JSON to the response body
-            self.wfile.write(bytes(json.dumps(keys), "utf-8"))
-            return
-
-
-        # If the request path is not recognized, respond with 405 Method Not Allowed
-        self.send_response(405)
-        self.end_headers()
-        return
-
-
-# Main execution to start the server 
+# Main execution to start the server
 if __name__ == "__main__":
+    init_db()  # Initialize the SQLite database
+    initialize_keys()  # Insert initial keys
+    
     webServer = HTTPServer((hostName, serverPort), MyServer)
     try:
-
-        # Start the server and handle requests until interrupted
         webServer.serve_forever()
     except KeyboardInterrupt:
         pass
 
-    # Close the server when the program ends
     webServer.server_close()

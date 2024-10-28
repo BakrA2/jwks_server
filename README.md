@@ -3,6 +3,8 @@ project 2 jwks server In python
 By: Bakr Alkhalidi 
 bma0152
 
+Project 2 screenshots are Test_client2 and Test_suite2
+
 This project is a simple JWT (JSON Web Token) authentication server built using Python's built-in `http.server` and the `cryptography` library for RSA key management. The server provides an endpoint for generating JWTs, as well as a JSON Web Key Set (JWKS) endpoint to verify the tokens.
 
 ## Features

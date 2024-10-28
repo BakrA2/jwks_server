@@ -12,7 +12,6 @@ import base64
 import json
 import jwt
 import datetime
-from datetime import timezone  # For fixing the deprecation warning
 
 # Server configuration
 hostName = "localhost"
@@ -47,19 +46,27 @@ def save_key_to_db(key_pem, exp_timestamp):
 def get_key_from_db(expired=False):
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
+
+    # Retrieve expired or valid key based on the flag
+    current_time = int(datetime.datetime.utcnow().timestamp())
     if expired:
-        c.execute('SELECT key FROM keys WHERE exp <= ? ORDER BY exp LIMIT 1', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+        c.execute('SELECT key FROM keys WHERE exp <= ? ORDER BY exp LIMIT 1', (current_time,))
+        print(f"Querying for expired keys before: {current_time}")
     else:
-        c.execute('SELECT key FROM keys WHERE exp > ? ORDER BY exp LIMIT 1', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+        c.execute('SELECT key FROM keys WHERE exp > ? ORDER BY exp LIMIT 1', (current_time,))
+        print(f"Querying for valid keys after: {current_time}")
+
     row = c.fetchone()
     conn.close()
+
+    # Return the key if found, otherwise None
     return row[0] if row else None
 
 # Get all valid keys (for JWKS)
 def get_all_valid_keys():
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
-    c.execute('SELECT key FROM keys WHERE exp > ?', (int(datetime.datetime.now(timezone.utc).timestamp()),))
+    c.execute('SELECT key FROM keys WHERE exp > ?', (int(datetime.datetime.utcnow().timestamp()),))
     rows = c.fetchall()
     conn.close()
     return [row[0] for row in rows]
@@ -90,9 +97,17 @@ def initialize_keys():
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     expired_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     
-    # Save keys in PEM format with expiry timestamps
-    save_key_to_db(serialize_key(private_key), int((datetime.datetime.now(timezone.utc) + datetime.timedelta(hours=1)).timestamp()))  # Valid for 1 hour
-    save_key_to_db(serialize_key(expired_key), int((datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=1)).timestamp()))  # Already expired
+    # Save valid key (expires in 1 hour)
+    valid_key_expiration = int((datetime.datetime.utcnow() + datetime.timedelta(hours=1)).timestamp())
+    save_key_to_db(serialize_key(private_key), valid_key_expiration)
+    
+    # Save expired key (expired 1 hour ago)
+    expired_key_expiration = int((datetime.datetime.utcnow() - datetime.timedelta(hours=1)).timestamp())
+    save_key_to_db(serialize_key(expired_key), expired_key_expiration)
+    
+    # Debugging prints to verify correct insertion of keys
+    print("Inserted valid key with exp:", valid_key_expiration)
+    print("Inserted expired key with exp:", expired_key_expiration)
 
 # Define server and request handlers
 class MyServer(BaseHTTPRequestHandler):
@@ -114,7 +129,7 @@ class MyServer(BaseHTTPRequestHandler):
                 }
                 token_payload = {
                     "user": "username",
-                    "exp": datetime.datetime.now(timezone.utc) + datetime.timedelta(hours=1) if not expired else datetime.datetime.now(timezone.utc) - datetime.timedelta(hours=1)
+                    "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1) if not expired else datetime.datetime.utcnow() - datetime.timedelta(hours=1)
                 }
                 encoded_jwt = jwt.encode(token_payload, private_key, algorithm="RS256", headers=headers)
                 self.send_response(200)
@@ -154,23 +169,6 @@ class MyServer(BaseHTTPRequestHandler):
             self.wfile.write(bytes(json.dumps({"keys": keys}), "utf-8"))
             return
         
-        self.send_response(404)
-        self.end_headers()
-        return
-
-    def do_PUT(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-    def do_PATCH(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-    def do_DELETE(self):
-        self.send_response(405)
-        self.end_headers()
-        return
-    def do_HEAD(self):
         self.send_response(405)
         self.end_headers()
         return

@@ -34,6 +34,7 @@ python3 jwks_server.py
 
 run the gade bot:
 /gradebot project1 
+/gradebot project2
 
 run the test client: 
 python3 test_jwks_server.py
